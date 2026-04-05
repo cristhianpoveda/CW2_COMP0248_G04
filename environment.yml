@@ -1,0 +1,16 @@
+name: comp0248_cw2
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - pytorch
+  - kornia
+  - opencv
+  - numpy
+  - scipy
+  - pip
+  - pip:
+    - rosbags==0.10.4
+    - lz4
+    - evo

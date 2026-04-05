@@ -1,0 +1,12 @@
+model:
+  weights: "indoor" # LoFTR pretrained indoor
+  target_res: [640, 480]
+
+feature_matching:
+  kdtree_threshold: 2.0 # Nearest neightbour max dist [px]
+
+pose_estimation:
+  ransac_prob: 0.999 # RANSAC confidence level
+  ransac_threshold: 1.0 # Epipolar line pixel distance threshold
+  pnp_reprojection_error: 3.0 
+  pnp_flags: "SOLVEPNP_ITERATIVE" # pnp solver method

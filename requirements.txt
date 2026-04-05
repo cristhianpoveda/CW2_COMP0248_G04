@@ -1,0 +1,16 @@
+# Deep Learning & Feature Matching
+torch
+kornia
+
+# Computer Vision & Math
+opencv-python
+numpy
+scipy
+pyqt
+
+# ROS Data Extraction
+rosbags==0.10.4
+lz4
+
+# Trajectory Evaluation
+evo
