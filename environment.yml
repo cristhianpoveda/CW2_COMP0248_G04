@@ -10,6 +10,9 @@ dependencies:
   - numpy
   - scipy
   - pillow
+  - pyqt
+  - matplotlib
+  - python-dateutil
   - pip
   - pip:
     - rosbags==0.10.4

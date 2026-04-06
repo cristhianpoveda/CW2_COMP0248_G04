@@ -1,21 +1,20 @@
-import os
 import csv
 import math
 from pathlib import Path
 
-def find_closest_timestamp(target_ts, available_timestamps):
-    
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+def find_closest_timestamp(target_ts: int, available_timestamps: list) -> int:
     return min(available_timestamps, key=lambda x: abs(x - target_ts))
 
-def split_sequences():
-    
-    base_dir = Path("GROUP_04_object_01")
+def main() -> None:
+    base_dir = PROJECT_ROOT / "data/GROUP_04_object_01"
     rgb_dir = base_dir / "camera_color_image_raw"
     depth_dir = base_dir / "camera_aligned_depth_to_color_image_raw"
-    csv_path = base_dir / "phasespace_rigids" / "trajectory_log.csv"
+    csv_path = base_dir / "phasespace_rigids/trajectory_log.csv"
     
     if not rgb_dir.exists() or not depth_dir.exists() or not csv_path.exists():
-        print("Error: Missing sources")
+        print(f"Error: Missing sources in {base_dir}")
         return
 
     rgb_images = sorted(rgb_dir.glob("*.png"), key=lambda x: int(x.stem))
@@ -55,14 +54,13 @@ def split_sequences():
             back_step -= step_size
     seq_B_indices = seq_B_indices[:50]
 
-    # PahseSpace
+    # PhaseSpace
     phasespace_data = {}
     with open(csv_path, 'r') as f:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames
         for row in reader:
-
-            if row['rigid_id'] == '1': # Only camera frame
+            if row['rigid_id'] == '1': 
                 ts = int(row['timestamp_ns'])
                 if ts not in phasespace_data:
                     phasespace_data[ts] = []
@@ -70,8 +68,8 @@ def split_sequences():
             
     available_ps_timestamps = sorted(list(phasespace_data.keys()))
 
-    def create_sequence(seq_name, indices):
-        seq_dir = Path(seq_name)
+    def create_sequence(seq_name: str, indices: list):
+        seq_dir = PROJECT_ROOT / f"data/{seq_name}"
         seq_rgb_dir = seq_dir / "camera_color_image_raw"
         seq_depth_dir = seq_dir / "camera_aligned_depth_to_color_image_raw"
         seq_ps_dir = seq_dir / "phasespace_rigids"
@@ -86,18 +84,14 @@ def split_sequences():
             writer.writeheader()
             
             for i, idx in enumerate(indices):
-                # RGB
                 rgb_file = rgb_images[idx]
                 img_timestamp = int(rgb_file.stem)
                 
-                # Depth sync
                 closest_depth_ts = find_closest_timestamp(img_timestamp, available_depth_ts)
                 depth_file = depth_dir / f"{closest_depth_ts}.png"
                 
-                # Index + timestamp
                 new_name_rgb = f"{i:02d}_{img_timestamp}.png"
-                
-                new_name_depth = f"{i:02d}_{img_timestamp}.png" # rename synchronised
+                new_name_depth = f"{i:02d}_{img_timestamp}.png" 
                 
                 target_rgb = seq_rgb_dir / new_name_rgb
                 if not target_rgb.exists():
@@ -107,7 +101,6 @@ def split_sequences():
                 if depth_file.exists() and not target_depth.exists():
                     target_depth.symlink_to(depth_file.resolve())
                 
-                # PhaseSpace sync
                 closest_ps_ts = find_closest_timestamp(img_timestamp, available_ps_timestamps)
                 for row in phasespace_data[closest_ps_ts]:
                     synced_row = row.copy()
@@ -115,10 +108,8 @@ def split_sequences():
                     writer.writerow(synced_row)
 
     create_sequence("Sequence_A", seq_A_indices)
-    
     create_sequence("Sequence_B", seq_B_indices)
-    
-    print("\nSuccess!")
+    print(f"\nSequences generated inside {PROJECT_ROOT}/data/")
 
 if __name__ == "__main__":
-    split_sequences()
+    main()
