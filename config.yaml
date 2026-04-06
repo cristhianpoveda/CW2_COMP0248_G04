@@ -10,3 +10,8 @@ pose_estimation:
   ransac_threshold: 1.0 # Epipolar line pixel distance threshold
   pnp_reprojection_error: 3.0 
   pnp_flags: "SOLVEPNP_ITERATIVE" # pnp solver method
+
+depth_estimation:
+  checkpoint: 'depth-anything/Depth-Anything-V2-large-hf'
+  TTA: False    # Test-Time Augmentation
+  JBF: False    # Joint Bilateral Filtering

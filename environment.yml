@@ -9,8 +9,10 @@ dependencies:
   - opencv
   - numpy
   - scipy
+  - pillow
   - pip
   - pip:
     - rosbags==0.10.4
     - lz4
     - evo
+    - transformers
