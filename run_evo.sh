@@ -62,13 +62,13 @@ for SEQ_DIR in "$RESULTS_DIR"/Sequence_*; do
 
         # 1. Run Absolute Pose Error (APE)
         echo -e "\n>>> Absolute Pose Error (APE)" >> "$LOG_FILE"
-        evo_ape tum "$GT_FILE" "$TRAJ_FILE" -a \
+        evo_ape tum "$GT_FILE" "$TRAJ_FILE" -as \
             --save_plot "$EVO_OUT_DIR/${TRAJ_NAME}_ape_plot.png" \
             >> "$LOG_FILE" 2>&1
 
         # 2. Run Relative Pose Error (RPE)
         echo -e "\n>>> Relative Pose Error (RPE)" >> "$LOG_FILE"
-        evo_rpe tum "$GT_FILE" "$TRAJ_FILE" -a \
+        evo_rpe tum "$GT_FILE" "$TRAJ_FILE" -as \
             --save_plot "$EVO_OUT_DIR/${TRAJ_NAME}_rpe_plot.png" \
             >> "$LOG_FILE" 2>&1
 
