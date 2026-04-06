@@ -9,51 +9,8 @@ import argparse
 from scipy.spatial import KDTree
 import yaml
 from typing import Tuple, Dict, Any, List, Optional
-
-class TensorLoader:
-    def __init__(self, K: np.ndarray, D: np.ndarray, target_res: Tuple[int, int] = (640, 480), device: torch.device = torch.device('cpu')) -> None:
-        self.K_orig: np.ndarray = np.array(K, dtype=np.float32)
-        self.D: np.ndarray = np.array(D, dtype=np.float32)
-        self.target_res: Tuple[int, int] = target_res
-        self.device: torch.device = device
-        
-        self.K_rescaled: Optional[np.ndarray] = None
-
-    def _undistort_image(self, img: np.ndarray) -> np.ndarray:
-        return cv2.undistort(img, self.K_orig, self.D)
-
-    def _rescale_calibration_matrix(self, orig_h: int, orig_w: int) -> np.ndarray:
-        """Scales the intrinsic matrix according to the new resolution."""
-        target_w, target_h = self.target_res
-        scale_x = target_w / orig_w
-        scale_y = target_h / orig_h
-        
-        K_new = self.K_orig.copy()
-        K_new[0, 0] *= scale_x  # fx
-        K_new[1, 1] *= scale_y  # fy
-        K_new[0, 2] *= scale_x  # cx
-        K_new[1, 2] *= scale_y  # cy
-        
-        self.K_rescaled = K_new
-        return K_new
-
-    def load_img_to_device_as_tensor(self, img_path: Path) -> torch.Tensor:
-        img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            raise FileNotFoundError(f"Image not found at {img_path}")
-            
-        orig_h, orig_w = img.shape
-        
-        img_undistorted = self._undistort_image(img)
-        
-        img_resized = cv2.resize(img_undistorted, self.target_res, interpolation=cv2.INTER_AREA)
-        if self.K_rescaled is None:
-            self._rescale_calibration_matrix(orig_h, orig_w)
-            
-        # Convert to PyTorch Tensor [B, C, H, W] normalized between [0, 1]
-        img_tensor = kornia.utils.image_to_tensor(img_resized, keepdim=False).float() / 255.0
-        
-        return img_tensor.to(self.device)
+from tensor_loader import TensorLoader
+from depth_estimation import DepthEstimator
 
 class PoseEstimation:
     def __init__(self, K: np.ndarray, D: np.ndarray, method: str = 'prosac', config: Dict[str, Any] = {}) -> None:
@@ -64,6 +21,7 @@ class PoseEstimation:
         
         self.matcher = LoFTR(pretrained=self.config['model']['weights']).to(self.device).eval()
         self.loader = TensorLoader(K, D, tuple(self.config['model']['target_res']), self.device)
+        self.depth_estimator = DepthEstimator(config=self.config['depth_estimation'])
         self.method: str = method
         self._tensor_cache: Dict[Path, torch.Tensor] = {}
 
@@ -72,20 +30,28 @@ class PoseEstimation:
         self.prev_pose_R: Optional[np.ndarray] = None
         self.prev_pose_t: Optional[np.ndarray] = None
 
-    def _get_tensor(self, img_path: Path) -> torch.Tensor:
-        """Helper to manage the tensor dictionary"""
+    def _get_frame_data(self, img_path: Path, require_depth: bool = False) -> dict:
+        """ Cache manager for LoFTR tensors and Depth maps """
         if img_path not in self._tensor_cache:
+            
             if len(self._tensor_cache) >= 3:
                 oldest_key = list(self._tensor_cache.keys())[0]
                 del self._tensor_cache[oldest_key]
             
-            self._tensor_cache[img_path] = self.loader.load_img_to_device_as_tensor(img_path)
+            frame_data = {
+                'tensor': self.loader.load_img_to_device_as_tensor(img_path),
+                'depth_map': None
+            }
+            self._tensor_cache[img_path] = frame_data
+            
+        if require_depth and self._tensor_cache[img_path]['depth_map'] is None:
+            self._tensor_cache[img_path]['depth_map'] = self.depth_estimator.estimate_depth_from_rgb(img_path)
             
         return self._tensor_cache[img_path]
     
     def _get_correspondences_img_pair(self, img_path_1: Path, img_path_2: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        img0_tensor = self._get_tensor(img_path_1)
-        img1_tensor = self._get_tensor(img_path_2)
+        img0_tensor = self._get_frame_data(img_path_1, require_depth=False)['tensor']
+        img1_tensor = self._get_frame_data(img_path_2, require_depth=False)['tensor']
 
         input_dict = {"image0": img0_tensor, "image1": img1_tensor}
         
@@ -317,6 +283,96 @@ class PoseEstimation:
         self.prev_pose_t = t_rel
         
         return R_rel, t_rel
+
+def compute_photometric_error(img_path_1: Path, img_path_2: Path, depth1: np.ndarray, K: np.ndarray, R: np.ndarray, t: np.ndarray, target_res: Tuple[int, int], mkpts1: np.ndarray, mkpts2: np.ndarray) -> Tuple[float, np.ndarray]:
+    """
+    Synthesizes Image 2 by warping Image 1 using the estimated pose and depth,
+    then calculates the Mean Absolute Error (MAE) between the synthetic and real Image 2.
+    """
+    img1_bgr = cv2.resize(cv2.imread(str(img_path_1)), target_res)
+    img2_bgr = cv2.resize(cv2.imread(str(img_path_2)), target_res)
+    
+    depth1 = cv2.resize(depth1, target_res, interpolation=cv2.INTER_NEAREST)
+
+    h, w = img1_bgr.shape[:2]
+    
+    u, v = np.meshgrid(np.arange(w), np.arange(h))
+    u = u.flatten()
+    v = v.flatten()
+    z = depth1.flatten()
+    
+    # Filter out invalid depth pixels (<= 0)
+    valid_depth = z > 0
+    u, v, z = u[valid_depth], v[valid_depth], z[valid_depth]
+    
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    
+    # Image 1 pixels into 3D space
+    X1 = (u - cx) * z / fx
+    Y1 = (v - cy) * z / fy
+    Z1 = z
+    P1 = np.vstack((X1, Y1, Z1))
+
+    t_mag_raw = np.linalg.norm(t)
+    if t_mag_raw > 0:
+
+        # Features shift between images
+        pixel_shifts = np.linalg.norm(mkpts1 - mkpts2, axis=1)
+        median_pixel_shift = np.median(pixel_shifts)
+        
+        # Scale: t = (pixel_shift * Z) / focal_length
+        calculated_t_mag = (median_pixel_shift * np.median(Z1)) / fx
+        
+        t = (t / t_mag_raw) * calculated_t_mag
+    
+    t = t.reshape(3, 1)
+    
+    # Move points to cam 2 pose
+    t = t.reshape(3, 1)
+    P2 = R @ P1 + t
+    
+    X2, Y2, Z2 = P2[0, :], P2[1, :], P2[2, :]
+    
+    # Filter points behind Camera 2
+    front_mask = Z2 > 0
+    X2, Y2, Z2 = X2[front_mask], Y2[front_mask], Z2[front_mask]
+    u_orig, v_orig = u[front_mask], v[front_mask]
+    
+    # Reproject 3D points onto Camera 2
+    u2 = np.round((X2 * fx / Z2) + cx).astype(int)
+    v2 = np.round((Y2 * fy / Z2) + cy).astype(int)
+    
+    # Filter points outside image 2
+    bounds_mask = (u2 >= 0) & (u2 < w) & (v2 >= 0) & (v2 < h)
+    u2, v2 = u2[bounds_mask], v2[bounds_mask]
+    u_orig, v_orig = u_orig[bounds_mask], v_orig[bounds_mask]
+    Z2_final = Z2[bounds_mask]
+    
+    # Choose closer point if 2 pixels overlap
+    sort_idx = np.argsort(Z2_final)[::-1]
+    u2, v2 = u2[sort_idx], v2[sort_idx]
+    u_orig, v_orig = u_orig[sort_idx], v_orig[sort_idx]
+    
+    synth_img2 = np.zeros_like(img2_bgr)
+    
+    synth_img2[v2, u2] = img1_bgr[v_orig, u_orig]
+    
+    # Photometric Error
+    mask = np.zeros((h, w), dtype=bool)
+    mask[v2, u2] = True
+
+    if np.sum(mask) == 0:
+        print("Warning: All points projected out of bounds. Returning NaN.")
+        return np.nan, synth_img2
+    
+    img2_float = img2_bgr.astype(np.float32)
+    synth_float = synth_img2.astype(np.float32)
+    
+    absolute_diff = np.abs(img2_float[mask] - synth_float[mask])
+    photometric_error = np.mean(absolute_diff)
+    
+    return photometric_error, synth_img2 
     
 def quaternion_from_matrix(matrix: np.ndarray) -> np.ndarray:
     """Converts a 3x3 rotation matrix to a quaternion (qx, qy, qz, qw) natively using OpenCV."""
@@ -330,6 +386,7 @@ def main() -> None:
     parser.add_argument('--output', type=str, default='loftr_trajectory_A.tum', help='Name of the putput TUM trajectory file')
     parser.add_argument('--method', type=str, choices=['vanilla', 'prosac'], default='prosac', help='Pose estimation pipeline: vanilla (RANSAC), prosac (ANMS+PROSAC)')
     parser.add_argument('--correspondences', type=str, choices=['sliding_window', 'pairwise', 'pnp'], default='pnp', help='Matching strategy')
+    parser.add_argument('--dont_reproject', action='store_true', help='Reproject image and calculate photometric error')
     parser.add_argument('--config', type=str, default='config.yaml', help='Path to the YAML hyperparameters file')
     
     args = parser.parse_args()
@@ -341,7 +398,7 @@ def main() -> None:
     except FileNotFoundError:
         print(f"Error: Config file {args.config} not found.")
         return
-
+    
     try:
         calib_data = np.load(args.calib_file)
         try:
@@ -364,6 +421,8 @@ def main() -> None:
     if not images:
         print(f"Error: No PNG images found in {seq_dir}")
         return
+    
+    seq_name = seq_dir.parent.name
 
     pose_estimator = PoseEstimation(K, D, method=args.method, config=config)
     
@@ -374,6 +433,12 @@ def main() -> None:
     
     timestamp_first = images[0].stem.split('_')[1] 
     tum_trajectory.append(f"{timestamp_first} 0.0 0.0 0.0 0.0 0.0 0.0 1.0\n")
+
+    if not args.dont_reproject:
+        results_dir = Path(f"results/{seq_name}")
+        synth_dir = results_dir / "synthetics_imgs"
+        synth_dir.mkdir(parents=True, exist_ok=True)
+        photometric_errors: List[float] = []
 
     print(f"Processing {len(images)} images from {seq_dir}...")
     
@@ -386,8 +451,10 @@ def main() -> None:
         if args.correspondences == 'sliding_window' and (i + 2) < len(images):
             img_path_3 = images[i+2]
             R_rel, t_rel = pose_estimator.estimate_pose_sliding_window(img_path_1, img_path_2, img_path_3)
+
         elif args.correspondences == 'pnp':
             R_rel, t_rel = pose_estimator.estimate_pose_pnp(img_path_1, img_path_2)
+
         else:
             R_rel, t_rel = pose_estimator.estimate_pose(img_path_1, img_path_2)
 
@@ -403,8 +470,44 @@ def main() -> None:
         
         tum_line = f"{timestamp_ns} {tx} {ty} {tz} {qx} {qy} {qz} {qw}\n"
         tum_trajectory.append(tum_line)
+
+        if not args.dont_reproject:
+            depth_map_1 = pose_estimator._get_frame_data(img_path_1, require_depth=True)['depth_map']
+
+            target_res = tuple(config['model']['target_res'])
+
+            mkpts1, mkpts2, _ = pose_estimator._get_correspondences_img_pair(img_path_1, img_path_2)
+            
+            error, synthetic_img = compute_photometric_error(
+                img_path_1, img_path_2, depth_map_1,
+                pose_estimator.loader.K_rescaled, 
+                R_rel, t_rel,
+                target_res,
+                mkpts1, mkpts2
+            )
+            
+            photometric_errors.append(error)
+            
+            synth_filename = synth_dir / f"synth_{img_path_2.name}"
+            cv2.imwrite(str(synth_filename), synthetic_img)
         
         print(f"Processed pair {i} -> {i+1}")
+
+    if not args.dont_reproject and photometric_errors:
+        valid_errors = [e for e in photometric_errors if not np.isnan(e)]
+        if valid_errors:
+            stats_file = results_dir / "photometric_error_stats.txt"
+            with open(stats_file, "w") as f:
+                f.write(f"--- Photometric Error Statistics ---\n")
+                f.write(f"Sequence: {args.sequence_path}\n")
+                f.write(f"Frames Evaluated: {len(photometric_errors)}\n")
+                f.write(f"Mean Error (MAE): {np.mean(photometric_errors):.4f}\n")
+                f.write(f"Median Error:     {np.median(photometric_errors):.4f}\n")
+                f.write(f"Min Error:        {np.min(photometric_errors):.4f}\n")
+                f.write(f"Max Error:        {np.max(photometric_errors):.4f}\n")
+                f.write(f"Std Deviation:    {np.std(photometric_errors):.4f}\n")
+            
+            print(f"Photometric statistics saved to {stats_file}")
 
     with open(args.output, "w") as f:
         f.writelines(tum_trajectory)
