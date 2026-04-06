@@ -5,8 +5,8 @@ from kornia.feature import LoFTR
 from pathlib import Path
 from scipy.spatial import KDTree
 from typing import Tuple, Dict, Any, List, Optional
-from tensor_loader import TensorLoader
-from depth_estimation import DepthEstimator
+from image_reprojection.tensor_loader import TensorLoader
+from image_reprojection.depth_estimation import DepthEstimator
 
 class PoseEstimation:
     def __init__(self, K: np.ndarray, D: np.ndarray, method: str = 'prosac', config: Dict[str, Any] = {}) -> None:

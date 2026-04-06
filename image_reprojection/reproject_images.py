@@ -5,8 +5,10 @@ from scipy.spatial import transform
 import argparse
 import yaml
 from typing import Tuple, List
-from pose_estimation import PoseEstimation
 from datetime import datetime
+from image_reprojection.pose_estimation import PoseEstimation
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 def compute_photometric_error(img_path_1: Path, img_path_2: Path, depth1: np.ndarray, K: np.ndarray, R: np.ndarray, t: np.ndarray, target_res: Tuple[int, int], mkpts1: np.ndarray, mkpts2: np.ndarray, no_splatting) -> Tuple[float, float, np.ndarray]:
     """
@@ -120,14 +122,13 @@ def quaternion_from_matrix(matrix: np.ndarray) -> np.ndarray:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Pairwise 6DOF Pose Estimation using LoFTR and PROSAC.")
-    parser.add_argument('--calib_file', type=str, default='calibration_data.npz', help='Path to the camera calibation .npz file')
-    parser.add_argument('--sequence_path', type=str, default='Sequence_A/camera_color_image_raw', help='Path to the RGB sequence directory')
-    parser.add_argument('--output', type=str, default='loftr_trajectory_A.tum', help='Name of the putput TUM trajectory file')
+    parser.add_argument('--calib_file', type=str, default=str(PROJECT_ROOT / 'data/calibration_data.npz'), help='Path to the camera calibation .npz file')
+    parser.add_argument('--sequence_path', type=str, default=str(PROJECT_ROOT / 'data/Sequence_A/camera_color_image_raw'), help='Path to the RGB sequence directory')
     parser.add_argument('--method', type=str, choices=['vanilla', 'prosac'], default='vanilla', help='Pose estimation pipeline: vanilla (RANSAC), prosac (ANMS+PROSAC)')
     parser.add_argument('--correspondences', type=str, choices=['sliding_window', 'pairwise', 'pnp'], default='pnp', help='Matching strategy')
     parser.add_argument('--dont_reproject', action='store_true', help='Reproject image and calculate photometric error')
     parser.add_argument('--no_splatting', action='store_true', help='Perform splatting to synthetic image')
-    parser.add_argument('--config', type=str, default='config.yaml', help='Path to the YAML hyperparameters file')
+    parser.add_argument('--config', type=str, default=str(PROJECT_ROOT / 'config/config.yaml'), help='Path to the YAML hyperparameters file')
     
     args = parser.parse_args()
 
@@ -174,13 +175,14 @@ def main() -> None:
     timestamp_first = images[0].stem.split('_')[1] 
     tum_trajectory.append(f"{timestamp_first} 0.0 0.0 0.0 0.0 0.0 0.0 1.0\n")
 
-    if not args.dont_reproject:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    splat_str = "nosplat" if getattr(args, 'no_splatting', False) else "splat"
+    run_name = f"{args.method}_{args.correspondences}_{splat_str}_{timestamp}"
+    seq_results_base = PROJECT_ROOT / f"results/{seq_name}"
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        splat_str = "nosplat" if getattr(args, 'no_splatting', False) else "splat"
-        run_name = f"{args.method}_{args.correspondences}_{splat_str}_{timestamp}"
+    if not args.dont_reproject:
         
-        results_dir = Path(f"results/{seq_name}/{run_name}")
+        results_dir = seq_results_base / run_name
         synth_dir = results_dir / "synthetics_imgs"
         synth_dir.mkdir(parents=True, exist_ok=True)
         
@@ -193,10 +195,15 @@ def main() -> None:
         with open(hyperparams_file, "w") as f:
             yaml.dump(hyperparameters_log, f, default_flow_style=False, sort_keys=False)
             
-        print(f"Run initialized. Hyperparameters saved to {hyperparams_file}")
+        print(f"Evaluation Run initialized. Hyperparameters saved to {hyperparams_file}")
 
         mae_errors: List[float] = []
         rmse_errors: List[float] = []
+    else:
+        
+        results_dir = seq_results_base / "trajectories"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Trajectory-Only Run. Outputs will save to {results_dir}")
 
     print(f"Processing {len(images)} images from {seq_dir}...")
     
@@ -284,12 +291,8 @@ def main() -> None:
             
             print(f"Photometric statistics saved to {stats_file}")
 
-    if not args.dont_reproject:
-        
-        trajectory_output_path = results_dir / args.output
-    else:
-        
-        trajectory_output_path = Path(args.output)
+    trajectory_filename = f"traj_{run_name}.tum"
+    trajectory_output_path = results_dir / trajectory_filename
 
     with open(trajectory_output_path, "w") as f:
         f.writelines(tum_trajectory)
