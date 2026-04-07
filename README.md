@@ -13,19 +13,23 @@ conda activate comp0248_cw2
 **Running the Code**
 1. **Data Preparation:** Extract data from rosbags, calibrate the camera and get the GT.
    ```bash
-   python -m data_extraction.info_extraction
-   python -m data_extraction.join_calibration_seq
-   python -m data_extraction.calibration
-   python -m data_extraction.get_seq
-   python -m data_extraction.convert_gt --sequence Sequence_A
+   python3 -m data_extraction.info_extraction
+   python3 -m data_extraction.join_calibration_seq
+   python3 -m data_extraction.calibration
+   python3 -m data_extraction.get_seq
+   python3 -m data_extraction.convert_gt --sequence Sequence_A
    ```
 2. **Pose Estimation & Reprojection:**
    ```bash
    # Full evaluation (creates synthetic images and photometric stats)
-   python -m image_reprojection.reproject_images --sequence_path data/Sequence_A/camera_color_image_raw
+   # Forward warping
+   python3 -m image_reprojection.reproject_images --no_splatting
+
+   # Inverse warping
+   python3 -m image_reprojection.reproject_images --warping inverse
    
    # Trajectory-only generation (no reprojection)
-   python -m image_reprojection.reproject_images --sequence_path data/Sequence_A/camera_color_image_raw --dont_reproject
+   python3 -m image_reprojection.reproject_images --dont_reproject
    ```
 3. **Trajectory Evaluation (EVO):**
    ```bash
