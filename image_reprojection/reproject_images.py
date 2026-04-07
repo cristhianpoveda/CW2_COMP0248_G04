@@ -6,11 +6,12 @@ import argparse
 import yaml
 from typing import Tuple, List
 from datetime import datetime
+import matplotlib.pyplot as plt
 from image_reprojection.pose_estimation import PoseEstimation
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-def compute_photometric_error(img_path_1: Path, img_path_2: Path, depth1: np.ndarray, K: np.ndarray, R: np.ndarray, t: np.ndarray, target_res: Tuple[int, int], mkpts1: np.ndarray, mkpts2: np.ndarray, no_splatting) -> Tuple[float, float, np.ndarray]:
+def compute_photometric_error_forward(img_path_1: Path, img_path_2: Path, depth1: np.ndarray, K: np.ndarray, R: np.ndarray, t: np.ndarray, target_res: Tuple[int, int], mkpts1: np.ndarray, mkpts2: np.ndarray, no_splatting) -> Tuple[float, float, np.ndarray, float]:
     """
     Synthesizes Image 2 by warping Image 1 using the estimated pose and depth,
     then calculates the Mean Absolute Error (MAE) between the synthetic and real Image 2.
@@ -99,10 +100,14 @@ def compute_photometric_error(img_path_1: Path, img_path_2: Path, depth1: np.nda
         
         mask[v2, u2] = True
 
+    valid_pixels = np.sum(mask)
+
     # Photometric Error
-    if np.sum(mask) == 0:
+    if valid_pixels == 0:
         print("Warning: All points projected out of bounds. Returning NaN.")
         return np.nan, np.nan, synth_img2
+    
+    valid_pixel_percentage = (valid_pixels / (h * w)) * 100.0
     
     img2_float = img2_bgr.astype(np.float32)
     synth_float = synth_img2.astype(np.float32)
@@ -113,12 +118,125 @@ def compute_photometric_error(img_path_1: Path, img_path_2: Path, depth1: np.nda
     squared_diff = np.square(img2_float[mask] - synth_float[mask])
     photometric_error_rmse = np.sqrt(np.mean(squared_diff))
     
-    return photometric_error_mae, photometric_error_rmse, synth_img2 
+    return photometric_error_mae, photometric_error_rmse, synth_img2, valid_pixel_percentage
+
+def compute_photometric_error_inverse(img_path_1: Path, img_path_2: Path, depth2: np.ndarray, K: np.ndarray, R: np.ndarray, t: np.ndarray, target_res: Tuple[int, int], mkpts1: np.ndarray, mkpts2: np.ndarray, no_splatting) -> Tuple[float, float, np.ndarray, float]:
+    """
+    Synthesizes Image 2 using Inverse Warping (Backward Projection).
+    It projects Image 2's grid into 3D, maps it to Camera 1, and samples colors from Image 1.
+    """
+    img1_bgr = cv2.resize(cv2.imread(str(img_path_1)), target_res)
+    img2_bgr = cv2.resize(cv2.imread(str(img_path_2)), target_res)
+    
+    depth2 = cv2.resize(depth2, target_res, interpolation=cv2.INTER_NEAREST)
+
+    h, w = img1_bgr.shape[:2]
+    
+    # Image 2 grid
+    u2, v2 = np.meshgrid(np.arange(w), np.arange(h))
+    u2_flat = u2.flatten()
+    v2_flat = v2.flatten()
+    z2_flat = depth2.flatten()
+    
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    
+    # Back-project Image 2 pixels into 3D space
+    X2 = (u2_flat - cx) * z2_flat / fx
+    Y2 = (v2_flat - cy) * z2_flat / fy
+    Z2 = z2_flat
+    P2 = np.vstack((X2, Y2, Z2))
+
+    # Relative scale
+    t_mag_raw = np.linalg.norm(t)
+    if t_mag_raw > 0:
+        
+        pixel_shifts = np.linalg.norm(mkpts1 - mkpts2, axis=1)
+        median_pixel_shift = np.median(pixel_shifts)
+        
+        valid_z2 = Z2[Z2 > 0]
+        if len(valid_z2) > 0:
+            
+            calculated_t_mag = (median_pixel_shift * np.median(valid_z2)) / fx
+            t = (t / t_mag_raw) * calculated_t_mag
+    
+    t = t.reshape(3, 1)
+    
+    # Inverse Pose Transformation (Cam 2 -> Cam 1)
+    # If P2 = R * P1 + t, then P1 = R^T * P2 - R^T * t
+    R_inv = R.T
+    t_inv = -R_inv @ t
+    
+    P1 = R_inv @ P2 + t_inv
+    X1, Y1, Z1 = P1[0, :], P1[1, :], P1[2, :]
+    
+    # Project 3D points onto Camera 1's image plane
+    Z1_safe = np.where(Z1 == 0, 1e-6, Z1)
+    u1_flat = (X1 * fx / Z1_safe) + cx
+    v1_flat = (Y1 * fy / Z1_safe) + cy
+    
+    # Reshape coordinates back to image dimensions
+    map_x = u1_flat.reshape(h, w).astype(np.float32)
+    map_y = v1_flat.reshape(h, w).astype(np.float32)
+    
+    # Sample Colors from Image 1
+    synth_img2 = cv2.remap(img1_bgr, map_x, map_y, 
+                           interpolation=cv2.INTER_LINEAR, 
+                           borderMode=cv2.BORDER_CONSTANT, 
+                           borderValue=(0, 0, 0))
+
+    Z1_map = Z1.reshape(h, w)
+    Z2_map = Z2.reshape(h, w)
+    
+    # A pixel in the synthetic image is valid for error calculation if:
+    # 1. It had a valid depth in Image 2
+    # 2. It landed in front of Camera 1
+    # 3. It sampled from coordinates strictly inside Image 1 boundaries
+    mask = (Z2_map > 0) & (Z1_map > 0) & \
+           (map_x >= 0) & (map_x < w - 1) & \
+           (map_y >= 0) & (map_y < h - 1)
+
+    # Photometric Error Calculation
+    valid_pixels = np.sum(mask)
+    
+    if valid_pixels == 0:
+        print("Warning: All points projected out of bounds. Returning NaN.")
+        return np.nan, np.nan, synth_img2, 0.0
+
+    valid_pixel_percentage = (valid_pixels / (h * w)) * 100.0
+    
+    img2_float = img2_bgr.astype(np.float32)
+    synth_float = synth_img2.astype(np.float32)
+    
+    absolute_diff = np.abs(img2_float[mask] - synth_float[mask])
+    photometric_error_mae = np.mean(absolute_diff)
+    
+    squared_diff = np.square(img2_float[mask] - synth_float[mask])
+    photometric_error_rmse = np.sqrt(np.mean(squared_diff))
+    
+    return photometric_error_mae, photometric_error_rmse, synth_img2, valid_pixel_percentage
     
 def quaternion_from_matrix(matrix: np.ndarray) -> np.ndarray:
     """Converts a 3x3 rotation matrix to a quaternion (qx, qy, qz, qw) natively using OpenCV."""
     r = transform.Rotation.from_matrix(matrix)
     return r.as_quat()
+
+def plot_photometric_errors(mae_errors: List[float], rmse_errors: List[float], output_path: Path) -> None:
+    """Generates and saves a line plot of photometric errors over time."""
+    plt.figure(figsize=(10, 5))
+    plt.plot(mae_errors, label='MAE', color='blue', linewidth=2)
+    plt.plot(rmse_errors, label='RMSE', color='red', linewidth=2)
+    
+    plt.title('Photometric Error per Frame Pair')
+    plt.xlabel('Frame Pair Index')
+    plt.ylabel('Error (Pixel Intensity)')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    plt.tight_layout()
+    plt.savefig(str(output_path))
+    plt.close()
+    print(f"Photometric error plot saved to {output_path}")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Pairwise 6DOF Pose Estimation using LoFTR and PROSAC.")
@@ -128,6 +246,7 @@ def main() -> None:
     parser.add_argument('--correspondences', type=str, choices=['sliding_window', 'pairwise', 'pnp'], default='pnp', help='Matching strategy')
     parser.add_argument('--dont_reproject', action='store_true', help='Reproject image and calculate photometric error')
     parser.add_argument('--no_splatting', action='store_true', help='Perform splatting to synthetic image')
+    parser.add_argument('--warping', type=str, choices=['forward', 'inverse'], default='forward', help='Select the image warping strategy')
     parser.add_argument('--config', type=str, default=str(PROJECT_ROOT / 'config/config.yaml'), help='Path to the YAML hyperparameters file')
     
     args = parser.parse_args()
@@ -199,6 +318,7 @@ def main() -> None:
 
         mae_errors: List[float] = []
         rmse_errors: List[float] = []
+        valid_pcts: List[float] = []
     else:
         
         results_dir = seq_results_base / "trajectories"
@@ -237,23 +357,30 @@ def main() -> None:
         tum_trajectory.append(tum_line)
 
         if not args.dont_reproject:
-            depth_map_1 = pose_estimator._get_frame_data(img_path_1, require_depth=True)['depth_map']
-
             target_res = tuple(config['model']['target_res'])
-
             mkpts1, mkpts2, _ = pose_estimator._get_correspondences_img_pair(img_path_1, img_path_2)
             
-            mae, rmse, synthetic_img = compute_photometric_error(
-                img_path_1, img_path_2, depth_map_1,
-                pose_estimator.loader.K_rescaled, 
-                R_rel, t_rel,
-                target_res,
-                mkpts1, mkpts2,
-                args.no_splatting
-            )
+            if args.warping == 'forward':
+                
+                depth_map = pose_estimator._get_frame_data(img_path_1, require_depth=True)['depth_map']
+                mae, rmse, synthetic_img, valid_pixel_percentage = compute_photometric_error_forward(
+                    img_path_1, img_path_2, depth_map,
+                    pose_estimator.loader.K_rescaled, R_rel, t_rel,
+                    target_res, mkpts1, mkpts2, args.no_splatting
+                )
+
+            else:
+                
+                depth_map = pose_estimator._get_frame_data(img_path_2, require_depth=True)['depth_map']
+                mae, rmse, synthetic_img, valid_pixel_percentage = compute_photometric_error_inverse(
+                    img_path_1, img_path_2, depth_map,
+                    pose_estimator.loader.K_rescaled, R_rel, t_rel,
+                    target_res, mkpts1, mkpts2, args.no_splatting
+                )
             
             mae_errors.append(mae)
             rmse_errors.append(rmse)
+            valid_pcts.append(valid_pixel_percentage)
             
             synth_filename = synth_dir / f"synth_{img_path_2.name}"
             orig_h, orig_w = cv2.imread(str(img_path_1)).shape[:2]
@@ -287,9 +414,19 @@ def main() -> None:
                 f.write(f"Median:   {np.median(valid_rmse):.4f}\n")
                 f.write(f"Min:      {np.min(valid_rmse):.4f}\n")
                 f.write(f"Max:      {np.max(valid_rmse):.4f}\n")
-                f.write(f"Std Dev:  {np.std(valid_rmse):.4f}\n")
+                f.write(f"Std Dev:  {np.std(valid_rmse):.4f}\n\n")
+
+                valid_pcts_clean = [p for p in valid_pcts if p > 0.0]
+                if valid_pcts_clean:
+                    f.write(f"--- Mask Density (Valid Pixels Evaluated) ---\n")
+                    f.write(f"Mean:     {np.mean(valid_pcts_clean):.2f}%\n")
+                    f.write(f"Min:      {np.min(valid_pcts_clean):.2f}%\n")
+                    f.write(f"Max:      {np.max(valid_pcts_clean):.2f}%\n")
             
             print(f"Photometric statistics saved to {stats_file}")
+
+            plot_file = results_dir / "photometric_error_plot.png"
+            plot_photometric_errors(valid_mae, valid_rmse, plot_file)
 
     trajectory_filename = f"traj_{run_name}.tum"
     trajectory_output_path = results_dir / trajectory_filename
