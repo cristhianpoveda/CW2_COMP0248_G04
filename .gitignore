@@ -229,6 +229,7 @@ GROUP_04_object_01/
 GROUP_04_object_02/
 combined_calibration_images/
 results/
+data/
 
 # Model Weights and Trajectory Outputs
 *.npz

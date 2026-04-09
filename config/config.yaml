@@ -12,6 +12,6 @@ pose_estimation:
   pnp_flags: "SOLVEPNP_ITERATIVE" # pnp solver method
 
 depth_estimation:
-  checkpoint: 'depth-anything/Depth-Anything-V2-large-hf'
+  checkpoint: 'ZoeD_N'
   TTA: False    # Test-Time Augmentation
   JBF: False    # Joint Bilateral Filtering

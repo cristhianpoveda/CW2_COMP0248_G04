@@ -1,21 +1,27 @@
 name: comp0248_cw2
 channels:
   - pytorch
+  - nvidia
   - conda-forge
   - defaults
 dependencies:
+  - python=3.10
+  
   - pytorch
-  - kornia
-  - opencv
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+  
   - numpy
   - scipy
-  - pillow
-  - pyqt
   - matplotlib
-  - python-dateutil
+  - pyyaml
+  - opencv
+  - pillow
   - pip
   - pip:
-    - rosbags==0.10.4
-    - lz4
-    - evo
-    - transformers
+      - kornia
+      - transformers
+      - rosbags
+      - evo
+      - timm==0.6.13
